@@ -1,0 +1,12 @@
+cat 0.0029 -2 2 235 195
+dog 0.0420 5 2 248 198
+horse 0.9754 5 3 248 198
+sheep 0.0034 20 2 259 200
+chair 0.0021 8 21 249 203
+pottedplant 0.0033 0 27 29 130
+pottedplant 0.0031 0 35 25 56
+pottedplant 0.0022 0 34 26 74
+pottedplant 0.0020 0 47 23 56
+pottedplant 0.0020 0 18 51 179
+pottedplant 0.0018 0 47 5 57
+pottedplant 0.0011 0 31 15 61

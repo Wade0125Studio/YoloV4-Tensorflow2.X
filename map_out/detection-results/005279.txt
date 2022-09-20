@@ -1,0 +1,4 @@
+aeroplane 0.0054 26 30 306 299
+bird 0.0347 24 31 310 202
+pottedplant 0.0029 26 29 306 300
+diningtable 0.0012 26 30 306 299

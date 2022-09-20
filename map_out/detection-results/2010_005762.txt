@@ -1,0 +1,9 @@
+person 0.0097 -6 0 501 366
+bicycle 0.0026 2 -1 236 374
+motorbike 0.0020 2 -1 236 374
+cow 0.0017 2 -1 236 374
+bottle 0.3590 0 0 239 373
+sofa 0.0025 -6 0 501 366
+diningtable 0.2784 -2 0 496 368
+diningtable 0.0010 -2 1 499 156
+diningtable 0.0010 403 3 499 364

@@ -16,13 +16,13 @@ from tensorflow.keras.optimizers import SGD, Adam
 
 from nets.yolo import get_train_model, yolo_body
 from nets.yolo_training import get_lr_scheduler
-from utils.callbacks import LossHistory, ModelCheckpoint
+from utils.callbacks import EvalCallback, LossHistory, ModelCheckpoint
 from utils.dataloader import YoloDatasets
-from utils.utils import get_anchors, get_classes
+from utils.utils import get_anchors, get_classes, show_config
 from utils.utils_fit import fit_one_epoch
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-  
 '''
 训练自己的目标检测模型一定需要注意以下几点：
 1、训练前仔细检查自己的格式是否满足要求，该库要求数据集格式为VOC格式，需要准备好的内容有输入图片和标签
@@ -32,23 +32,24 @@ from utils.utils_fit import fit_one_epoch
 
    标签为.xml格式，文件中会有需要检测的目标信息，标签文件和输入图片文件相对应。
 
-2、训练好的权值文件保存在logs文件夹中，每个epoch都会保存一次，如果只是训练了几个step是不会保存的，epoch和step的概念要捋清楚一下。
-   在训练过程中，该代码并没有设定只保存最低损失的，因此按默认参数训练完会有100个权值，如果空间不够可以自行删除。
-   这个并不是保存越少越好也不是保存越多越好，有人想要都保存、有人想只保存一点，为了满足大多数的需求，还是都保存可选择性高。
-
-3、损失值的大小用于判断是否收敛，比较重要的是有收敛的趋势，即验证集损失不断下降，如果验证集损失基本上不改变的话，模型基本上就收敛了。
+2、损失值的大小用于判断是否收敛，比较重要的是有收敛的趋势，即验证集损失不断下降，如果验证集损失基本上不改变的话，模型基本上就收敛了。
    损失值的具体大小并没有什么意义，大和小只在于损失的计算方式，并不是接近于0才好。如果想要让损失好看点，可以直接到对应的损失函数里面除上10000。
    训练过程中的损失值会保存在logs文件夹下的loss_%Y_%m_%d_%H_%M_%S文件夹中
-
-4、调参是一门蛮重要的学问，没有什么参数是一定好的，现有的参数是我测试过可以正常训练的参数，因此我会建议用现有的参数。
-   但是参数本身并不是绝对的，比如随着batch的增大学习率也可以增大，效果也会好一些；过深的网络不要用太大的学习率等等。
-   这些都是经验上，只能靠各位同学多查询资料和自己试试了。
-'''  
+   
+3、训练好的权值文件保存在logs文件夹中，每个训练世代（Epoch）包含若干训练步长（Step），每个训练步长（Step）进行一次梯度下降。
+   如果只是训练了几个Step是不会保存的，Epoch和Step的概念要捋清楚一下。
+'''
 if __name__ == "__main__":
     #----------------------------------------------------#
     #   是否使用eager模式训练
     #----------------------------------------------------#
     eager           = False
+    #---------------------------------------------------------------------#
+    #   train_gpu   训练用到的GPU
+    #               默认为第一张卡、双卡为[0, 1]、三卡为[0, 1, 2]
+    #               在使用多GPU时，每个卡上的batch为总batch除以卡的数量。
+    #---------------------------------------------------------------------#
+    train_gpu       = [0,]
     #---------------------------------------------------------------------#
     #   classes_path    指向model_data下的txt，与自己训练的数据集相关 
     #                   训练前一定要修改classes_path，使其对应自己的数据集
@@ -86,16 +87,28 @@ if __name__ == "__main__":
     #------------------------------------------------------#
     input_shape     = [416, 416]
     #------------------------------------------------------------------#
-    #   mosaic          马赛克数据增强
-    #                   参考YoloX，由于Mosaic生成的训练图片，
-    #                   远远脱离自然图片的真实分布。
-    #                   本代码会在训练结束前的N个epoch自动关掉Mosaic
-    #                   100个世代会关闭30个世代（比例可在dataloader.py调整）
-    #   label_smoothing 标签平滑。一般0.01以下。如0.01、0.005
+    #   mosaic              马赛克数据增强。
+    #   mosaic_prob         每个step有多少概率使用mosaic数据增强，默认50%。
+    #
+    #   mixup               是否使用mixup数据增强，仅在mosaic=True时有效。
+    #                       只会对mosaic增强后的图片进行mixup的处理。
+    #   mixup_prob          有多少概率在mosaic后使用mixup数据增强，默认50%。
+    #                       总的mixup概率为mosaic_prob * mixup_prob。
+    #
+    #   special_aug_ratio   参考YoloX，由于Mosaic生成的训练图片，远远脱离自然图片的真实分布。
+    #                       当mosaic=True时，本代码会在special_aug_ratio范围内开启mosaic。
+    #                       默认为前70%个epoch，100个世代会开启70个世代。
     #
     #   余弦退火算法的参数放到下面的lr_decay_type中设置
     #------------------------------------------------------------------#
     mosaic              = True
+    mosaic_prob         = 0.5
+    mixup               = True
+    mixup_prob          = 0.5
+    special_aug_ratio   = 0.7
+    #------------------------------------------------------------------#
+    #   label_smoothing     标签平滑。一般0.01以下。如0.01、0.005。
+    #------------------------------------------------------------------#
     label_smoothing     = 0
 
     #----------------------------------------------------------------------------------------------------------------------------#
@@ -104,14 +117,23 @@ if __name__ == "__main__":
     #      
     #   在此提供若干参数设置建议，各位训练者根据自己的需求进行灵活调整：
     #   （一）从整个模型的预训练权重开始训练： 
-    #       Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 100，Freeze_Train = True（默认参数）
-    #       Init_Epoch = 0，UnFreeze_Epoch = 100，Freeze_Train = False（不冻结训练）
-    #       其中：UnFreeze_Epoch可以在100-300之间调整。optimizer_type = 'sgd'，Init_lr = 1e-2。
+    #       Adam：
+    #           Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 100，Freeze_Train = True，optimizer_type = 'adam'，Init_lr = 1e-3，weight_decay = 0。（冻结）
+    #           Init_Epoch = 0，UnFreeze_Epoch = 100，Freeze_Train = False，optimizer_type = 'adam'，Init_lr = 1e-3，weight_decay = 0。（不冻结）
+    #       SGD：
+    #           Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 300，Freeze_Train = True，optimizer_type = 'sgd'，Init_lr = 1e-2，weight_decay = 5e-4。（冻结）
+    #           Init_Epoch = 0，UnFreeze_Epoch = 300，Freeze_Train = False，optimizer_type = 'sgd'，Init_lr = 1e-2，weight_decay = 5e-4。（不冻结）
+    #       其中：UnFreeze_Epoch可以在100-300之间调整。
     #   （二）从主干网络的预训练权重开始训练：
-    #       Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 300，Freeze_Train = True（冻结训练）
-    #       Init_Epoch = 0，UnFreeze_Epoch = 300，Freeze_Train = False（不冻结训练）
+    #       Adam：
+    #           Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 100，Freeze_Train = True，optimizer_type = 'adam'，Init_lr = 1e-3，weight_decay = 0。（冻结）
+    #           Init_Epoch = 0，UnFreeze_Epoch = 100，Freeze_Train = False，optimizer_type = 'adam'，Init_lr = 1e-3，weight_decay = 0。（不冻结）
+    #       SGD：
+    #           Init_Epoch = 0，Freeze_Epoch = 50，UnFreeze_Epoch = 300，Freeze_Train = True，optimizer_type = 'sgd'，Init_lr = 1e-2，weight_decay = 5e-4。（冻结）
+    #           Init_Epoch = 0，UnFreeze_Epoch = 300，Freeze_Train = False，optimizer_type = 'sgd'，Init_lr = 1e-2，weight_decay = 5e-4。（不冻结）
     #       其中：由于从主干网络的预训练权重开始训练，主干的权值不一定适合目标检测，需要更多的训练跳出局部最优解。
-    #             UnFreeze_Epoch可以在200-300之间调整，YOLOV5和YOLOX均推荐使用300。optimizer_type = 'sgd'，Init_lr = 1e-2。
+    #             UnFreeze_Epoch可以在150-300之间调整，YOLOV5和YOLOX均推荐使用300。
+    #             Adam相较于SGD收敛的快一些。因此UnFreeze_Epoch理论上可以小一点，但依然推荐更多的Epoch。
     #   （三）从0开始训练：
     #       Init_Epoch = 0，UnFreeze_Epoch >= 300，Unfreeze_batch_size >= 16，Freeze_Train = False（不冻结训练）
     #       其中：UnFreeze_Epoch尽量不小于300。optimizer_type = 'sgd'，Init_lr = 1e-2，mosaic = True。
@@ -141,14 +163,15 @@ if __name__ == "__main__":
     #   此时模型的主干不被冻结了，特征提取网络会发生改变
     #   占用的显存较大，网络所有的参数都会发生改变
     #   UnFreeze_Epoch          模型总共训练的epoch
+    #                           SGD需要更长的时间收敛，因此设置较大的UnFreeze_Epoch
+    #                           Adam可以使用相对较小的UnFreeze_Epoch
     #   Unfreeze_batch_size     模型在解冻后的batch_size
     #------------------------------------------------------------------#
-    UnFreeze_Epoch      = 100
+    UnFreeze_Epoch      = 300
     Unfreeze_batch_size = 4
     #------------------------------------------------------------------#
     #   Freeze_Train    是否进行冻结训练
     #                   默认先冻结主干训练后解冻训练。
-    #                   如果设置Freeze_Train=False，建议使用优化器为sgd
     #------------------------------------------------------------------#
     Freeze_Train        = True
     
@@ -169,6 +192,7 @@ if __name__ == "__main__":
     #                   当使用SGD优化器时建议设置   Init_lr=1e-2
     #   momentum        优化器内部使用到的momentum参数
     #   weight_decay    权值衰减，可防止过拟合
+    #                   adam会导致weight_decay错误，使用adam时建议设置为0。
     #------------------------------------------------------------------#
     optimizer_type      = "sgd"
     momentum            = 0.937
@@ -178,9 +202,32 @@ if __name__ == "__main__":
     #------------------------------------------------------------------#
     lr_decay_type       = 'cos'
     #------------------------------------------------------------------#
-    #   save_period     多少个epoch保存一次权值，默认每个世代都保存
+    #   focal_loss      是否使用Focal Loss平衡正负样本
+    #   focal_alpha     Focal Loss的正负样本平衡参数
+    #   focal_gamma     Focal Loss的难易分类样本平衡参数
     #------------------------------------------------------------------#
-    save_period         = 1
+    focal_loss          = False
+    focal_alpha         = 0.25
+    focal_gamma         = 2
+    #------------------------------------------------------------------#
+    #   save_period     多少个epoch保存一次权值
+    #------------------------------------------------------------------#
+    save_period         = 10
+    #------------------------------------------------------------------#
+    #   save_dir        权值与日志文件保存的文件夹
+    #------------------------------------------------------------------#
+    save_dir            = 'logs'
+    #------------------------------------------------------------------#
+    #   eval_flag       是否在训练时进行评估，评估对象为验证集
+    #                   安装pycocotools库后，评估体验更佳。
+    #   eval_period     代表多少个epoch评估一次，不建议频繁的评估
+    #                   评估需要消耗较多的时间，频繁评估会导致训练非常慢
+    #   此处获得的mAP会与get_map.py获得的会有所不同，原因有二：
+    #   （一）此处获得的mAP为验证集的mAP。
+    #   （二）此处设置评估参数较为保守，目的是加快评估速度。
+    #------------------------------------------------------------------#
+    eval_flag           = True
+    eval_period         = 10
     #------------------------------------------------------------------#
     #   num_workers     用于设置是否使用多线程读取数据，1代表关闭多线程
     #                   开启后会加快数据读取速度，但是会占用更多内存
@@ -196,25 +243,66 @@ if __name__ == "__main__":
     train_annotation_path   = '2007_train.txt'
     val_annotation_path     = '2007_val.txt'
 
+    #------------------------------------------------------#
+    #   设置用到的显卡
+    #------------------------------------------------------#
+    os.environ["CUDA_VISIBLE_DEVICES"]  = ','.join(str(x) for x in train_gpu)
+    ngpus_per_node                      = len(train_gpu)
+    
+    gpus = tf.config.experimental.list_physical_devices(device_type='GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    
+    #------------------------------------------------------#
+    #   判断当前使用的GPU数量与机器上实际的GPU数量
+    #------------------------------------------------------#
+    if ngpus_per_node > 1 and ngpus_per_node > len(gpus):
+        raise ValueError("The number of GPUs specified for training is more than the GPUs on the machine")
+        
+    if ngpus_per_node > 1:
+        strategy = tf.distribute.MirroredStrategy()
+    else:
+        strategy = None
+    print('Number of devices: {}'.format(ngpus_per_node))
+
     #----------------------------------------------------#
     #   获取classes和anchor
     #----------------------------------------------------#
     class_names, num_classes = get_classes(classes_path)
     anchors, num_anchors     = get_anchors(anchors_path)
 
-    #------------------------------------------------------#
-    #   创建yolo模型
-    #------------------------------------------------------#
-    model_body  = yolo_body((None, None, 3), anchors_mask, num_classes, weight_decay)
-    if model_path != '':
+    #----------------------------------------------------#
+    #   判断是否多GPU载入模型和预训练权重
+    #----------------------------------------------------#
+    if ngpus_per_node > 1:
+        with strategy.scope():
+            #------------------------------------------------------#
+            #   创建yolo模型
+            #------------------------------------------------------#
+            model_body  = yolo_body((None, None, 3), anchors_mask, num_classes, weight_decay)
+            if model_path != '':
+                #------------------------------------------------------#
+                #   载入预训练权重
+                #------------------------------------------------------#
+                print('Load weights {}.'.format(model_path))
+                model_body.load_weights(model_path, by_name=True, skip_mismatch=True)
+                
+            if not eager:
+                model = get_train_model(model_body, input_shape, num_classes, anchors, anchors_mask, label_smoothing, focal_loss, focal_alpha, focal_gamma)
+    else:
         #------------------------------------------------------#
-        #   载入预训练权重
+        #   创建yolo模型
         #------------------------------------------------------#
-        print('Load weights {}.'.format(model_path))
-        model_body.load_weights(model_path, by_name=True, skip_mismatch=True)
-        
-    if not eager:
-        model = get_train_model(model_body, input_shape, num_classes, anchors, anchors_mask, label_smoothing)
+        model_body  = yolo_body((None, None, 3), anchors_mask, num_classes, weight_decay)
+        if model_path != '':
+            #------------------------------------------------------#
+            #   载入预训练权重
+            #------------------------------------------------------#
+            print('Load weights {}.'.format(model_path))
+            model_body.load_weights(model_path, by_name=True, skip_mismatch=True)
+            
+        if not eager:
+            model = get_train_model(model_body, input_shape, num_classes, anchors, anchors_mask, label_smoothing, focal_loss, focal_alpha, focal_gamma)
 
     #---------------------------#
     #   读取数据集对应的txt
@@ -226,6 +314,28 @@ if __name__ == "__main__":
     num_train   = len(train_lines)
     num_val     = len(val_lines)
 
+    show_config(
+        classes_path = classes_path, anchors_path = anchors_path, anchors_mask = anchors_mask, model_path = model_path, input_shape = input_shape, \
+        Init_Epoch = Init_Epoch, Freeze_Epoch = Freeze_Epoch, UnFreeze_Epoch = UnFreeze_Epoch, Freeze_batch_size = Freeze_batch_size, Unfreeze_batch_size = Unfreeze_batch_size, Freeze_Train = Freeze_Train, \
+        Init_lr = Init_lr, Min_lr = Min_lr, optimizer_type = optimizer_type, momentum = momentum, lr_decay_type = lr_decay_type, \
+        save_period = save_period, save_dir = save_dir, num_workers = num_workers, num_train = num_train, num_val = num_val
+    )
+    #---------------------------------------------------------#
+    #   总训练世代指的是遍历全部数据的总次数
+    #   总训练步长指的是梯度下降的总次数 
+    #   每个训练世代包含若干训练步长，每个训练步长进行一次梯度下降。
+    #   此处仅建议最低训练世代，上不封顶，计算时只考虑了解冻部分
+    #----------------------------------------------------------#
+    wanted_step = 5e4 if optimizer_type == "sgd" else 1.5e4
+    total_step  = num_train // Unfreeze_batch_size * UnFreeze_Epoch
+    if total_step <= wanted_step:
+        if num_train // Unfreeze_batch_size == 0:
+            raise ValueError('数据集过小，无法进行训练，请扩充数据集。')
+        wanted_epoch = wanted_step // (num_train // Unfreeze_batch_size) + 1
+        print("\n\033[1;33;44m[Warning] 使用%s优化器时，建议将训练总步长设置到%d以上。\033[0m"%(optimizer_type, wanted_step))
+        print("\033[1;33;44m[Warning] 本次运行的总训练数据量为%d，Unfreeze_batch_size为%d，共训练%d个Epoch，计算出总训练步长为%d。\033[0m"%(num_train, Unfreeze_batch_size, UnFreeze_Epoch, total_step))
+        print("\033[1;33;44m[Warning] 由于总训练步长为%d，小于建议总步长%d，建议设置总世代为%d。\033[0m"%(total_step, wanted_step, wanted_epoch))
+        
     #------------------------------------------------------#
     #   主干特征提取网络特征通用，冻结训练可以加快训练速度
     #   也可以在训练初期防止权值被破坏。
@@ -246,11 +356,13 @@ if __name__ == "__main__":
         batch_size  = Freeze_batch_size if Freeze_Train else Unfreeze_batch_size
         
         #-------------------------------------------------------------------#
-        #   判断当前batch_size与64的差别，自适应调整学习率
+        #   判断当前batch_size，自适应调整学习率
         #-------------------------------------------------------------------#
-        nbs     = 64
-        Init_lr_fit = max(batch_size / nbs * Init_lr, 1e-4)
-        Min_lr_fit  = max(batch_size / nbs * Min_lr, 1e-6)
+        nbs             = 64
+        lr_limit_max    = 1e-3 if optimizer_type == 'adam' else 5e-2
+        lr_limit_min    = 3e-4 if optimizer_type == 'adam' else 5e-4
+        Init_lr_fit     = min(max(batch_size / nbs * Init_lr, lr_limit_min), lr_limit_max)
+        Min_lr_fit      = min(max(batch_size / nbs * Min_lr, lr_limit_min * 1e-2), lr_limit_max * 1e-2)
 
         #---------------------------------------#
         #   获得学习率下降的公式
@@ -263,8 +375,10 @@ if __name__ == "__main__":
         if epoch_step == 0 or epoch_step_val == 0:
             raise ValueError('数据集过小，无法进行训练，请扩充数据集。')
 
-        train_dataloader    = YoloDatasets(train_lines, input_shape, anchors, batch_size, num_classes, anchors_mask, Init_Epoch, UnFreeze_Epoch, mosaic = mosaic, train = True)
-        val_dataloader      = YoloDatasets(val_lines, input_shape, anchors, batch_size, num_classes, anchors_mask, Init_Epoch, UnFreeze_Epoch, mosaic = False, train = False)
+        train_dataloader    = YoloDatasets(train_lines, input_shape, anchors, batch_size, num_classes, anchors_mask, Init_Epoch, UnFreeze_Epoch, \
+                                            mosaic=mosaic, mixup=mixup, mosaic_prob=mosaic_prob, mixup_prob=mixup_prob, train=True, special_aug_ratio=special_aug_ratio)
+        val_dataloader      = YoloDatasets(val_lines, input_shape, anchors, batch_size, num_classes, anchors_mask, Init_Epoch, UnFreeze_Epoch, \
+                                            mosaic=False, mixup=False, mosaic_prob=0, mixup_prob=0, train=False, special_aug_ratio=0)
 
         optimizer = {
             'adam'  : Adam(lr = Init_lr, beta_1 = momentum),
@@ -281,10 +395,16 @@ if __name__ == "__main__":
 
             gen     = gen.shuffle(buffer_size = batch_size).prefetch(buffer_size = batch_size)
             gen_val = gen_val.shuffle(buffer_size = batch_size).prefetch(buffer_size = batch_size)
+            
+            if ngpus_per_node > 1:
+                gen     = strategy.experimental_distribute_dataset(gen)
+                gen_val = strategy.experimental_distribute_dataset(gen_val)
 
             time_str        = datetime.datetime.strftime(datetime.datetime.now(),'%Y_%m_%d_%H_%M_%S')
-            log_dir         = os.path.join('logs', "loss_" + str(time_str))
+            log_dir         = os.path.join(save_dir, "loss_" + str(time_str))
             loss_history    = LossHistory(log_dir)
+            eval_callback   = EvalCallback(model_body, input_shape, anchors, anchors_mask, class_names, num_classes, val_lines, log_dir, \
+                                            eval_flag=eval_flag, period=eval_period)
             #---------------------------------------#
             #   开始模型训练
             #---------------------------------------#
@@ -297,11 +417,13 @@ if __name__ == "__main__":
                     batch_size      = Unfreeze_batch_size
 
                     #-------------------------------------------------------------------#
-                    #   判断当前batch_size与64的差别，自适应调整学习率
+                    #   判断当前batch_size，自适应调整学习率
                     #-------------------------------------------------------------------#
-                    nbs     = 64
-                    Init_lr_fit = max(batch_size / nbs * Init_lr, 1e-4)
-                    Min_lr_fit  = max(batch_size / nbs * Min_lr, 1e-6)
+                    nbs             = 64
+                    lr_limit_max    = 1e-3 if optimizer_type == 'adam' else 5e-2
+                    lr_limit_min    = 3e-4 if optimizer_type == 'adam' else 5e-4
+                    Init_lr_fit     = min(max(batch_size / nbs * Init_lr, lr_limit_min), lr_limit_max)
+                    Min_lr_fit      = min(max(batch_size / nbs * Min_lr, lr_limit_min * 1e-2), lr_limit_max * 1e-2)
                     #---------------------------------------#
                     #   获得学习率下降的公式
                     #---------------------------------------#
@@ -324,15 +446,18 @@ if __name__ == "__main__":
 
                     gen     = gen.shuffle(buffer_size = batch_size).prefetch(buffer_size = batch_size)
                     gen_val = gen_val.shuffle(buffer_size = batch_size).prefetch(buffer_size = batch_size)
+            
+                    if ngpus_per_node > 1:
+                        gen     = strategy.experimental_distribute_dataset(gen)
+                        gen_val = strategy.experimental_distribute_dataset(gen_val)
                     
                     UnFreeze_flag = True
 
                 lr = lr_scheduler_func(epoch)
                 K.set_value(optimizer.lr, lr)
-                K.set_value(optimizer.lr, lr)
 
-                fit_one_epoch(model_body, loss_history, optimizer, epoch, epoch_step, epoch_step_val, gen, gen_val, 
-                            end_epoch, input_shape, anchors, anchors_mask, num_classes, label_smoothing, save_period)
+                fit_one_epoch(model_body, loss_history, eval_callback, optimizer, epoch, epoch_step, epoch_step_val, gen, gen_val, 
+                            end_epoch, input_shape, anchors, anchors_mask, num_classes, label_smoothing, focal_loss, focal_alpha, focal_gamma, save_period, save_dir, strategy)
 
                 train_dataloader.on_epoch_end()
                 val_dataloader.on_epoch_end()
@@ -340,7 +465,11 @@ if __name__ == "__main__":
             start_epoch = Init_Epoch
             end_epoch   = Freeze_Epoch if Freeze_Train else UnFreeze_Epoch
 
-            model.compile(optimizer = optimizer, loss={'yolo_loss': lambda y_true, y_pred: y_pred})
+            if ngpus_per_node > 1:
+                with strategy.scope():
+                    model.compile(optimizer = optimizer, loss={'yolo_loss': lambda y_true, y_pred: y_pred})
+            else:
+                model.compile(optimizer = optimizer, loss={'yolo_loss': lambda y_true, y_pred: y_pred})
             #-------------------------------------------------------------------------------#
             #   训练参数的设置
             #   logging         用于设置tensorboard的保存地址
@@ -349,19 +478,25 @@ if __name__ == "__main__":
             #   early_stopping  用于设定早停，val_loss多次不下降自动结束训练，表示模型基本收敛
             #-------------------------------------------------------------------------------#
             time_str        = datetime.datetime.strftime(datetime.datetime.now(),'%Y_%m_%d_%H_%M_%S')
-            log_dir         = os.path.join('logs', "loss_" + str(time_str))
+            log_dir         = os.path.join(save_dir, "loss_" + str(time_str))
             logging         = TensorBoard(log_dir)
             loss_history    = LossHistory(log_dir)
-            checkpoint      = ModelCheckpoint('logs/ep{epoch:03d}-loss{loss:.3f}-val_loss{val_loss:.3f}.h5',
+            checkpoint      = ModelCheckpoint(os.path.join(save_dir, "ep{epoch:03d}-loss{loss:.3f}-val_loss{val_loss:.3f}.h5"), 
                                     monitor = 'val_loss', save_weights_only = True, save_best_only = False, period = save_period)
+            checkpoint_last = ModelCheckpoint(os.path.join(save_dir, "last_epoch_weights.h5"), 
+                                    monitor = 'val_loss', save_weights_only = True, save_best_only = False, period = 1)
+            checkpoint_best = ModelCheckpoint(os.path.join(save_dir, "best_epoch_weights.h5"), 
+                                    monitor = 'val_loss', save_weights_only = True, save_best_only = True, period = 1)
             early_stopping  = EarlyStopping(monitor='val_loss', min_delta = 0, patience = 10, verbose = 1)
             lr_scheduler    = LearningRateScheduler(lr_scheduler_func, verbose = 1)
-            callbacks       = [logging, loss_history, checkpoint, lr_scheduler, early_stopping]
+            eval_callback   = EvalCallback(model_body, input_shape, anchors, anchors_mask, class_names, num_classes, val_lines, log_dir, \
+                                            eval_flag=eval_flag, period=eval_period)
+            callbacks       = [logging, loss_history, checkpoint, checkpoint_last, checkpoint_best, lr_scheduler, eval_callback]
 
             if start_epoch < end_epoch:
                 print('Train on {} samples, val on {} samples, with batch size {}.'.format(num_train, num_val, batch_size))
-                model.fit_generator(
-                    generator           = train_dataloader,
+                model.fit(
+                    x                   = train_dataloader,
                     steps_per_epoch     = epoch_step,
                     validation_data     = val_dataloader,
                     validation_steps    = epoch_step_val,
@@ -381,21 +516,27 @@ if __name__ == "__main__":
                 end_epoch   = UnFreeze_Epoch
                     
                 #-------------------------------------------------------------------#
-                #   判断当前batch_size与64的差别，自适应调整学习率
+                #   判断当前batch_size，自适应调整学习率
                 #-------------------------------------------------------------------#
-                nbs     = 64
-                Init_lr_fit = max(batch_size / nbs * Init_lr, 1e-4)
-                Min_lr_fit  = max(batch_size / nbs * Min_lr, 1e-6)
+                nbs             = 64
+                lr_limit_max    = 1e-3 if optimizer_type == 'adam' else 5e-2
+                lr_limit_min    = 3e-4 if optimizer_type == 'adam' else 5e-4
+                Init_lr_fit     = min(max(batch_size / nbs * Init_lr, lr_limit_min), lr_limit_max)
+                Min_lr_fit      = min(max(batch_size / nbs * Min_lr, lr_limit_min * 1e-2), lr_limit_max * 1e-2)
                 #---------------------------------------#
                 #   获得学习率下降的公式
                 #---------------------------------------#
                 lr_scheduler_func = get_lr_scheduler(lr_decay_type, Init_lr_fit, Min_lr_fit, UnFreeze_Epoch)
                 lr_scheduler    = LearningRateScheduler(lr_scheduler_func, verbose = 1)
-                callbacks       = [logging, loss_history, checkpoint, lr_scheduler, early_stopping]
-
+                callbacks       = [logging, loss_history, checkpoint, checkpoint_last, checkpoint_best, lr_scheduler, eval_callback]
+                    
                 for i in range(len(model_body.layers)): 
                     model_body.layers[i].trainable = True
-                model.compile(optimizer = optimizer, loss={'yolo_loss': lambda y_true, y_pred: y_pred})
+                if ngpus_per_node > 1:
+                    with strategy.scope():
+                        model.compile(optimizer = optimizer, loss={'yolo_loss': lambda y_true, y_pred: y_pred})
+                else:
+                    model.compile(optimizer = optimizer, loss={'yolo_loss': lambda y_true, y_pred: y_pred})
 
                 epoch_step      = num_train // batch_size
                 epoch_step_val  = num_val // batch_size
@@ -407,8 +548,8 @@ if __name__ == "__main__":
                 val_dataloader.batch_size      = Unfreeze_batch_size
 
                 print('Train on {} samples, val on {} samples, with batch size {}.'.format(num_train, num_val, batch_size))
-                model.fit_generator(
-                    generator           = train_dataloader,
+                model.fit(
+                    x                   = train_dataloader,
                     steps_per_epoch     = epoch_step,
                     validation_data     = val_dataloader,
                     validation_steps    = epoch_step_val,

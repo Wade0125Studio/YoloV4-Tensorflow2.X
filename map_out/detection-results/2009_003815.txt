@@ -1,0 +1,9 @@
+person 0.0106 0 0 123 372
+person 0.0065 0 1 56 389
+bicycle 0.5800 20 0 494 364
+bicycle 0.0018 0 0 123 372
+bicycle 0.0012 4 1 262 373
+chair 0.0010 1 0 123 371
+pottedplant 0.5383 20 0 494 364
+pottedplant 0.0017 1 0 123 371
+pottedplant 0.0010 298 166 499 369

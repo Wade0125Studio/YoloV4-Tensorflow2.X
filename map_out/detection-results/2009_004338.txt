@@ -1,0 +1,10 @@
+motorbike 0.9825 0 56 393 305
+motorbike 0.8709 312 49 500 232
+motorbike 0.0080 0 132 54 218
+motorbike 0.0044 63 54 502 213
+motorbike 0.0034 0 126 20 225
+motorbike 0.0024 0 133 9 226
+motorbike 0.0017 494 69 499 215
+motorbike 0.0014 -1 53 52 221
+motorbike 0.0013 0 88 100 241
+motorbike 0.0012 0 110 7 213

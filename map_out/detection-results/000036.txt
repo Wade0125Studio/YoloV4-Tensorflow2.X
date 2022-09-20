@@ -1,0 +1,10 @@
+person 0.0010 17 26 322 333
+dog 0.9873 19 86 315 336
+sofa 0.0012 17 26 322 333
+pottedplant 0.0205 9 0 108 28
+pottedplant 0.0039 8 0 161 38
+pottedplant 0.0023 36 0 72 28
+pottedplant 0.0017 4 0 67 14
+pottedplant 0.0017 -5 0 61 28
+pottedplant 0.0016 0 0 81 46
+pottedplant 0.0010 20 -1 108 15

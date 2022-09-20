@@ -1,0 +1,5 @@
+bicycle 0.0010 11 0 443 359
+car 0.0035 463 1 501 75
+motorbike 0.9981 27 0 467 356
+pottedplant 0.0055 463 1 501 75
+pottedplant 0.0010 456 3 499 163
